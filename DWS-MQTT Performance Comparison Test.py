@@ -118,6 +118,58 @@ class MQTTExperimentManager:
         self._last_disk_io = None
         self._last_power_measure_time = None
 
+    async def measure_real_rtt(self, address, port, count=4, timeout=1.0):
+        """
+        真实RTT测量：使用TCP连接测量网络延迟
+        """
+        rtts = []
+        for i in range(count):
+            try:
+                start_time = time.time()
+                # 创建TCP连接
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                sock.connect((address, port))
+                sock.close()
+                end_time = time.time()
+                
+                rtt = (end_time - start_time) * 1000  # 转换为毫秒
+                rtts.append(rtt)
+                
+                # 短暂间隔，避免过于频繁的连接
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                print(f"RTT测量失败 (尝试 {i+1}/{count}): {e}")
+                # 连接失败，使用超时时间作为RTT
+                rtts.append(timeout * 1000)
+        
+        if rtts:
+            avg_rtt = sum(rtts) / len(rtts)
+            print(f"RTT测量完成 {address}:{port} - 平均延迟: {avg_rtt:.2f}ms")
+            return avg_rtt
+        else:
+            print(f"RTT测量失败 {address}:{port} - 使用默认值")
+            return timeout * 1000
+
+    async def measure_broker_rtts(self, brokers, root_broker=None):
+        """
+        测量所有代理之间的RTT
+        """
+        print("开始真实RTT测量...")
+        rtt_dict = {}
+        
+        # 测量所有代理对之间的RTT
+        for i, broker1 in enumerate(brokers):
+            for j, broker2 in enumerate(brokers):
+                if i != j:  # 不测量自己到自己的RTT
+                    rtt = await self.measure_real_rtt(broker1.address, broker2.port)
+                    rtt_dict[(broker1.id, broker2.id)] = rtt
+                    print(f"代理 {broker1.id} -> {broker2.id}: {rtt:.2f}ms")
+        
+        print(f"RTT测量完成，共测量 {len(rtt_dict)} 个代理对")
+        return rtt_dict
+
     def _empty_metrics(self):
         return {
             'latency': [],
@@ -159,8 +211,9 @@ class MQTTExperimentManager:
                 # 构建WRSSSFManager并生成树
                 manager = WRS_SSF_st.WRSSSFManager()
                 manager.brokers = brokers
-                # 生成模拟RTT
-                manager.rtt_dict = {(b1.id, b2.id): 10+abs(b1.id-b2.id)*5 for b1 in brokers for b2 in brokers if b1.id != b2.id}
+                # 真实RTT测量
+                print("DWS-MQTT: 开始真实RTT测量...")
+                manager.rtt_dict = await self.measure_broker_rtts(brokers)
                 manager.G = manager.generate_network_graph()
                 scores = manager.calculate_node_scores(manager.G)
                 manager.root_broker = max(brokers, key=lambda b: scores[b.id])
@@ -181,8 +234,19 @@ class MQTTExperimentManager:
                         rtt=0,
                         config_path=f"D:/mosquitto-configs/mosquitto_DMQTT_broker{i+1}.conf"
                     ))
-                # 生成模拟RTT
-                rtt_dict = {b.id: 10+abs(b.id-brokers[0].id)*5 for b in brokers}
+                # 真实RTT测量
+                print("DMQTT: 开始真实RTT测量...")
+                full_rtt_dict = await self.measure_broker_rtts(brokers)
+                
+                # 转换为DMQTT算法期望的格式：{broker.id: rtt_to_root}
+                rtt_dict = {}
+                root_broker = brokers[0]
+                for broker in brokers:
+                    if broker.id != root_broker.id:
+                        # 获取到根节点的RTT
+                        rtt_to_root = full_rtt_dict.get((broker.id, root_broker.id), 1000)  # 默认1000ms
+                        rtt_dict[broker.id] = rtt_to_root
+                        print(f"代理 {broker.id} 到根节点 {root_broker.id} 的RTT: {rtt_to_root:.2f}ms")
                 root_broker = brokers[0]
                 stp_tree = st_mod.generate_stp_tree(brokers, root_broker, rtt_dict)
                 # 生成parent_map: {broker_id: parent_id}
