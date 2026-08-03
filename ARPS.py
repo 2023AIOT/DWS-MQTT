@@ -339,6 +339,7 @@ def calculate_node_scores(G, alpha=0.21, beta=0.13, gamma=0.19, delta=0.24, lamb
     # 获取最大度和最大计算能力
     degrees = [G.degree(n) for n in G.nodes()]
     max_degree = max(degrees) if degrees and max(degrees) > 0 else 1  # 确保不为零
+    max_avg_rtt = max(avg_shortest_paths.values()) if avg_shortest_paths else 1
 
     compute_powers = [G.nodes[n]["compute_power"] for n in G.nodes()]
     max_compute = max(compute_powers) if compute_powers else 1  # 确保不为零
@@ -349,16 +350,13 @@ def calculate_node_scores(G, alpha=0.21, beta=0.13, gamma=0.19, delta=0.24, lamb
         C_v = G.nodes[node]["compute_power"]
         P_v = G.nodes[node]["power_usage"]
         R_v = G.nodes[node]["reliability"]
-        D_v = avg_shortest_paths[node]
-
-        # 避免除以零
-        if D_v == 0:
-            D_v = 0.001  # 设置一个很小的非零值
+        L_v = avg_shortest_paths[node]
+        normalized_latency = (L_v / max_avg_rtt) if max_avg_rtt > 0 else 0
 
         # 归一化计算得分
         S_v = (alpha * (d_v / max_degree) +
                beta * (C_v / max_compute) -
-               gamma * (1 / D_v) +
+               gamma * (1 - normalized_latency) +
                delta * R_v -
                lambda_ * P_v)
 
