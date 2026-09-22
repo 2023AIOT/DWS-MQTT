@@ -404,7 +404,7 @@ class MQTTExperimentManager:
     def write_reproducibility_manifest(self, mode):
         """Record software, workload parameters and source hashes."""
         self.results_dir.mkdir(parents=True, exist_ok=True)
-        sources = ['New Test.py', *[f'{name}.py' for name in REQUIRED_BASELINE_MODULES.values()]]
+        sources = ['RUN_EXPERIMENTS.py', *[f'{name}.py' for name in REQUIRED_BASELINE_MODULES.values()]]
         hashes = {}
         for source in sources:
             path = Path(source)
@@ -3037,7 +3037,7 @@ if __name__ == "__main__":
     sample_interval = 5
     
     # 解析命令行参数
-    # python NewTest.py [mode] [duration]
+    # python RUN_EXPERIMENTS.py [mode] [duration]
     # mode: default, failure, churn, full
     # duration: 实验持续时间(秒)
     
@@ -3073,13 +3073,13 @@ if __name__ == "__main__":
     print("  full    - 完整实验（所有实验类型）")
     print()
     print("使用示例:")
-    print("  python NewTest.py            # 默认基础实验（30 brokers）")
-    print("  python NewTest.py failure   # 故障实验（10 brokers）")
-    print("  python NewTest.py churn     # Churn实验（10 brokers）")
-    print("  python NewTest.py overlap   # 主题重叠实验")
-    print("  python NewTest.py wildcard  # 通配符订阅实验")
-    print("  python NewTest.py full      # 完整实验")
-    print("  python NewTest.py default 120   # 自定义持续时间")
+    print("  python RUN_EXPERIMENTS.py            # 默认基础实验（30 brokers）")
+    print("  python RUN_EXPERIMENTS.py failure   # 故障实验（10 brokers）")
+    print("  python RUN_EXPERIMENTS.py churn     # Churn实验（10 brokers）")
+    print("  python RUN_EXPERIMENTS.py overlap   # 主题重叠实验")
+    print("  python RUN_EXPERIMENTS.py wildcard  # 通配符订阅实验")
+    print("  python RUN_EXPERIMENTS.py full      # 完整实验")
+    print("  python RUN_EXPERIMENTS.py default 120   # 自定义持续时间")
     print("=" * 70)
     print()
     
