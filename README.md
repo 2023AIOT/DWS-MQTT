@@ -58,8 +58,7 @@ C:\mosquitto\mosquitto.exe
 
 ## Installation
 
-From a fresh clone, create a Python 3.9 environment and install the pinned
-dependencies:
+From the code repository, create a Python 3.9 environment and install the pinned dependencies:
 
 ```powershell
 py -3.9 -m venv .venv
@@ -172,8 +171,7 @@ At the start of the default or full run, the driver writes:
 experiment_results/reproducibility_manifest.json
 ```
 
-The manifest records the platform, Python and package versions, workload,
-broker settings, random-seed field, and SHA-256 hashes of the five source files.
+The manifest records the platform, Python and package versions, workload, broker settings and random seed.
 Generated Mosquitto configurations and logs are written below:
 
 ```text
