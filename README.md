@@ -83,9 +83,7 @@ quota, per-process memory quota, or network-namespace isolation is applied.
 All processes share the host CPU, memory, loopback interface, and operating
 system scheduler.
 
-The distributed methods use 30 broker processes. Their listeners occupy
-consecutive loopback ports `1884` through `1913`. The centralized MQTT baseline
-uses one broker on `localhost:1884`.
+The centralized MQTT baseline uses a single broker listening on localhost:1883. The distributed methods use 30 independent broker processes, whose listeners are assigned consecutive loopback ports starting from 1884.
 
 ## Topology construction
 
