@@ -85,10 +85,10 @@ system scheduler.
 
 The centralized MQTT baseline uses a single broker listening on localhost:1883. The distributed methods use 30 independent broker processes, whose listeners are assigned consecutive loopback ports starting from 1884.
 
-## Topology construction
+## Topology and baseline configuration
 
 
-The topology adapters apply the following inputs:
+The experiment driver uses the following topology and baseline configurations:
 
 | Method | Topology input used by the experiment driver |
 | --- | --- |
@@ -99,8 +99,7 @@ The topology adapters apply the following inputs:
 
 DWS-MQTT uses initial ARPS weights `alpha=0.229`, `beta=0.175`,
 `gamma=0.171`, `delta=0.250`, and `lambda=0.175`, a load threshold of `0.7`,
-and an update interval of 30 s. The exact algorithm implementations in the
-source files are authoritative for all remaining parameters.
+and an update interval of 30 s. The corresponding source files provide the remaining implementation-level parameters used by the experiment driver.
 
 This localhost setup does not reproduce the heterogeneous latency,
 bandwidth, congestion, jitter, packet loss, hardware variation, or failure
@@ -141,9 +140,6 @@ python RUN_EXPERIMENTS.py default
 # Broker-count scaling at 10, 20, and 30 brokers
 python RUN_EXPERIMENTS.py scaled
 
-# 10-broker failure experiment: 20% fail every 15 s, 10 s recovery wait
-python RUN_EXPERIMENTS.py failure
-
 # 10-broker subscription churn: 30% of subscribers every 10 s
 python RUN_EXPERIMENTS.py churn
 
@@ -169,7 +165,7 @@ At the start of the default or full run, the driver writes:
 experiment_results/reproducibility_manifest.json
 ```
 
-The manifest records the platform, Python and package versions, workload, broker settings and random seed.
+The manifest records the platform, Python and package versions, workload and broker settings. 
 Generated Mosquitto configurations and logs are written below:
 
 ```text
