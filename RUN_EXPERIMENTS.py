@@ -126,6 +126,8 @@ class MQTTExperimentManager:
         self.measurement_time = 50  # 50 s 统计区间
 
         self.random_seed = 42  # 随机种子，保证可重复性
+        self.dws_subscription_plan = {}  # DWS: precomputed subscriptions used to generate selective bridge filters
+        self.dws_bridge_filters = {}      # DWS: bridge filter sets keyed by child broker port
         self.retain_messages = False  # 是否保留消息
         self.clean_session = True  # 是否使用clean session
 
@@ -768,13 +770,21 @@ class MQTTExperimentManager:
             )
             self.protocol_topology[algorithm] = parent_map
 
+            # DWS bridge filters are derived from the planned subscriber scopes on each tree cut.
+            if algorithm == 'DWS-MQTT':
+                self._prepare_dws_subscription_plan(broker_ports)
+                self._build_dws_bridge_filter_map(broker_ports, parent_map)
+
             # 创建配置文件
             for i, port in enumerate(broker_ports):
                 is_root = (i == 0)
                 parent_port = None
                 if not is_root and port in parent_map:
                     parent_port = parent_map.get(port)
-                config_path = self.create_broker_config(algorithm, i + 1, port, is_root, parent_port)
+                dws_filters = self.dws_bridge_filters.get(port) if algorithm == 'DWS-MQTT' else None
+                config_path = self.create_broker_config(
+                    algorithm, i + 1, port, is_root, parent_port, dws_filters=dws_filters
+                )
                 config_paths.append(config_path)
             mosquitto_path = self.find_mosquitto_executable()
             for i, config_path in enumerate(config_paths):
@@ -839,7 +849,117 @@ class MQTTExperimentManager:
         except Exception as e:
             print(f"清理现有代理进程时出错: {e}")
 
-    def create_broker_config(self, algorithm, broker_id, port, is_root=False, parent_port=None):
+    def _prepare_dws_subscription_plan(self, broker_ports):
+        """Precompute DWS test subscriptions so bridge filters match actual test clients.
+
+        Includes bounded topic scopes used by the experiment's subscription-change
+        routine, so those updates remain reachable without reverting to '#'.
+        """
+        rng = random.Random(self.random_seed)
+        pairs_per_broker = [self.client_count] * len(broker_ports)
+        total_pairs = sum(pairs_per_broker)
+        overlap_count = int(total_pairs * self.topic_overlap_ratio) if self.topic_overlap_enabled else 0
+        wildcard_count = int(total_pairs * self.wildcard_ratio) if self.wildcard_subscription_enabled else 0
+        plan = {}
+        for broker_index, port in enumerate(broker_ports):
+            for pair_index_local in range(pairs_per_broker[broker_index]):
+                global_index = sum(pairs_per_broker[:broker_index]) + pair_index_local
+                use_wildcard = wildcard_count > 0 and global_index < wildcard_count
+                use_overlap = (overlap_count > 0 and not use_wildcard and
+                               wildcard_count <= global_index < wildcard_count + overlap_count)
+                if use_wildcard:
+                    initial = rng.choice(self.wildcard_patterns).format('DWS-MQTT')
+                elif use_overlap:
+                    group = (global_index - wildcard_count) % 5
+                    initial = f"test/DWS-MQTT/overlap/group{group}/#"
+                else:
+                    initial = f"test/DWS-MQTT/data/{broker_index}/{pair_index_local}"
+                # The enabled subscription-change routine can add/switch within
+                # these two bounded namespaces during a measurement.
+                allowed = [initial]
+                if self.subscription_change_enabled and not self.subscription_churn_enabled:
+                    allowed.extend(['test/DWS-MQTT/wildcard/#', 'test/DWS-MQTT/switch/#'])
+                plan[(broker_index, pair_index_local)] = allowed
+        self.dws_subscription_plan = plan
+        return plan
+
+    @staticmethod
+    def _mqtt_filter_is_covered(candidate, existing):
+        """Conservative filter coverage test for simple MQTT +/# filters.
+
+        Avoids adding a narrower filter when an already-generated filter covers
+        it. This is deliberately conservative; it never attempts risky rewrites.
+        """
+        if existing == '#':
+            return True
+        c_parts, e_parts = candidate.split('/'), existing.split('/')
+        for i, e in enumerate(e_parts):
+            if e == '#':
+                return i == len(e_parts) - 1
+            if i >= len(c_parts):
+                return False
+            c = c_parts[i]
+            if e != '+' and c != e:
+                return False
+        return len(c_parts) == len(e_parts)
+
+    def _build_dws_bridge_filter_map(self, broker_ports, parent_map):
+        """Build topic filters on each tree edge from subscriptions across its cut.
+
+        For child->parent (out), filters are subscriptions on the parent-side of
+        the cut. For parent->child (in), filters are subscriptions in the child
+        subtree. Subscription filters are deduplicated conservatively.
+        """
+        if not self.dws_subscription_plan:
+            self._prepare_dws_subscription_plan(broker_ports)
+        port_to_index = {port: i for i, port in enumerate(broker_ports)}
+        children = {port: [] for port in broker_ports}
+        for child, parent in parent_map.items():
+            if child in children and parent in children:
+                children[parent].append(child)
+
+        def subtree(root):
+            result, stack = set(), [root]
+            while stack:
+                node = stack.pop()
+                if node in result:
+                    continue
+                result.add(node)
+                stack.extend(children.get(node, []))
+            return result
+
+        all_ports = set(broker_ports)
+        filters_by_child = {}
+        for child, parent in parent_map.items():
+            if child not in all_ports or parent not in all_ports:
+                continue
+            child_side = subtree(child)
+            parent_side = all_ports - child_side
+            in_filters, out_filters = [], []
+            # Incoming from parent: downstream receivers in child subtree.
+            for (broker_idx, _pair), topics in self.dws_subscription_plan.items():
+                if broker_ports[broker_idx] in child_side:
+                    in_filters.extend(topics)
+            # Outgoing to parent: receivers outside child subtree.
+            for (broker_idx, _pair), topics in self.dws_subscription_plan.items():
+                if broker_ports[broker_idx] in parent_side:
+                    out_filters.extend(topics)
+            filters_by_child[child] = {
+                'in': self._dedupe_mqtt_filters(in_filters),
+                'out': self._dedupe_mqtt_filters(out_filters),
+            }
+        self.dws_bridge_filters = filters_by_child
+        return filters_by_child
+
+    @classmethod
+    def _dedupe_mqtt_filters(cls, filters):
+        result = []
+        for f in sorted(set(filters)):
+            if not any(cls._mqtt_filter_is_covered(f, existing) for existing in result):
+                result.append(f)
+        return result
+
+    def create_broker_config(self, algorithm, broker_id, port, is_root=False, parent_port=None, dws_filters=None):
         config_dir = str((self.results_dir / 'mosquitto_configs').resolve())
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, f"mosquitto_{algorithm}_broker{broker_id}.conf")
@@ -858,13 +978,23 @@ max_packet_size {algo_config['max_packet_size']}
         # 树型结构：只为有父节点的broker添加桥接配置
         # 子节点连接到父节点，接收来自父节点的消息，并向父节点发送本地消息
         if parent_port is not None:
+            if algorithm == 'DWS-MQTT' and dws_filters is not None:
+                bridge_topic_lines = []
+                for topic_filter in dws_filters.get('in', []):
+                    bridge_topic_lines.append(f"topic {topic_filter} in 2")
+                for topic_filter in dws_filters.get('out', []):
+                    bridge_topic_lines.append(f"topic {topic_filter} out 2")
+                # Empty filter sets are valid for a direction: no topic directive
+                # means no bridge subscription/forwarding for that direction.
+                bridge_topics = '\n'.join(bridge_topic_lines)
+            else:
+                bridge_topics = "topic # in 2\ntopic # out 2"
             config_content += f"""
-# Bridge configuration - 子节点连接到父节点
+# Bridge configuration - child connects to parent
 connection bridge_{broker_id}_to_parent
 address localhost:{parent_port}
-# topic 配置: 本地发布主题 # (out), 远程订阅主题 # (in)
-topic # in 2
-topic # out 2
+# DWS uses subscription-derived filters; other baselines retain their original wildcard config.
+{bridge_topics}
 bridge_protocol_version {algo_config['bridge_protocol_version']}
 cleansession {str(self.clean_session).lower()}
 try_private true
@@ -1007,27 +1137,34 @@ max_keepalive {algo_config['max_keepalive']}
                         sub_client = mqtt.Client(client_id=sub_client_id)
                     sub_client.broker_id = i
                     
-                    # 确定订阅主题类型：通配符、重叠或普通
-                    client_pair_index = sum(pairs_per_broker[:i]) + j
-                    use_wildcard = (wildcard_count > 0 and client_pair_index < wildcard_count)
-                    use_overlap = (overlap_count > 0 and not use_wildcard and 
-                                   wildcard_count <= client_pair_index < wildcard_count + overlap_count)
-                    
-                    if use_wildcard:
-                        # 使用通配符主题
-                        pattern = random.choice(self.wildcard_patterns)
-                        topic = pattern.format(algorithm)
-                        sub_client.topic_type = 'wildcard'
-                    elif use_overlap:
-                        # 使用重叠主题（多个客户端订阅同一主题）
-                        overlap_group = (client_pair_index - wildcard_count) % 5
-                        topic = f"test/{algorithm}/overlap/group{overlap_group}/#"
-                        sub_client.topic_type = 'overlap'
-                        self.overlapping_topics.append(topic)
+                    # DWS subscriptions use the same precomputed plan that generated its bridge filters.
+                    if algorithm == 'DWS-MQTT' and (i, j) in self.dws_subscription_plan:
+                        topic = self.dws_subscription_plan[(i, j)][0]
+                        if '/overlap/' in topic:
+                            sub_client.topic_type = 'overlap'
+                            self.overlapping_topics.append(topic)
+                        elif '+' in topic or '#' in topic:
+                            sub_client.topic_type = 'wildcard'
+                        else:
+                            sub_client.topic_type = 'normal'
                     else:
-                        # 普通主题
-                        topic = f"test/{algorithm}/data/{i}/{j}"
-                        sub_client.topic_type = 'normal'
+                        # Existing subscription assignment remains unchanged for other algorithms.
+                        client_pair_index = sum(pairs_per_broker[:i]) + j
+                        use_wildcard = (wildcard_count > 0 and client_pair_index < wildcard_count)
+                        use_overlap = (overlap_count > 0 and not use_wildcard and
+                                       wildcard_count <= client_pair_index < wildcard_count + overlap_count)
+                        if use_wildcard:
+                            pattern = random.choice(self.wildcard_patterns)
+                            topic = pattern.format(algorithm)
+                            sub_client.topic_type = 'wildcard'
+                        elif use_overlap:
+                            overlap_group = (client_pair_index - wildcard_count) % 5
+                            topic = f"test/{algorithm}/overlap/group{overlap_group}/#"
+                            sub_client.topic_type = 'overlap'
+                            self.overlapping_topics.append(topic)
+                        else:
+                            topic = f"test/{algorithm}/data/{i}/{j}"
+                            sub_client.topic_type = 'normal'
                     
                     sub_client.topic = topic
                     sub_client.on_message = self._on_message
